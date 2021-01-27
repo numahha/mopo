@@ -4,6 +4,8 @@ import pdb
 
 from mopo.models.fc import FC
 from mopo.models.bnn import BNN
+from mopo.models.bnnr import BNNR
+from mopo.models.bnnc import BNNC
 
 def construct_model(obs_dim=11, act_dim=3, rew_dim=1, hidden_dim=200, num_networks=7,
 					num_elites=5, session=None, model_type='mlp', separate_mean_var=False,
@@ -41,6 +43,82 @@ def construct_model(obs_dim=11, act_dim=3, rew_dim=1, hidden_dim=200, num_networ
 
 	model.finalize(tf.train.AdamOptimizer, {"learning_rate": 0.001})
 	print('[ BNN ] Model: {}'.format(model))
+	return model
+
+def construct_modelr(obs_dim=11, act_dim=3, hidden_dim=200, num_networks=7,
+					num_elites=5, session=None, model_type='mlp', separate_mean_var=False,
+					name=None, load_dir=None, deterministic=False):
+	if name is None:
+		name = 'BNNR'
+	print('[ BNNR ] Name {} | Observation dim {} | Action dim: {} | Hidden dim: {}'.format(name, obs_dim, act_dim, hidden_dim))
+	params = {'name': name, 'num_networks': num_networks, 'num_elites': num_elites,
+				'sess': session, 'separate_mean_var': separate_mean_var, 'deterministic': deterministic}
+
+	if load_dir is not None:
+		print('Specified load dir', load_dir)
+		params['model_dir'] = load_dir
+
+	model = BNNR(params)
+
+	if not model.model_loaded:
+		if model_type == 'identity':
+			return
+		elif model_type == 'linear':
+			print('[ BNNR ] Training linear model')
+			model.add(FC(obs_dim+rew_dim, input_dim=obs_dim+act_dim, weight_decay=0.000025))
+		elif model_type == 'mlp':
+			print('[ BNNR ] Training non-linear model | Obs: {} | Act: {} '.format(obs_dim, act_dim))
+			model.add(FC(hidden_dim, input_dim=obs_dim+act_dim, activation="swish", weight_decay=0.000025))
+			model.add(FC(hidden_dim, activation="swish", weight_decay=0.00005))
+			model.add(FC(hidden_dim, activation="swish", weight_decay=0.000075))
+			model.add(FC(hidden_dim, activation="swish", weight_decay=0.000075))
+			model.add(FC(1, weight_decay=0.0001))
+			if separate_mean_var:
+				model.add(FC(1, input_dim=hidden_dim, weight_decay=0.0001), var_layer=True)
+
+	if load_dir is not None:
+		model.model_loaded = True
+
+	model.finalize(tf.train.AdamOptimizer, {"learning_rate": 0.001})
+	print('[ BNNR ] Model: {}'.format(model))
+	return model
+
+def construct_modelc(obs_dim=11, act_dim=3, hidden_dim=200, num_networks=7,
+					num_elites=5, session=None, model_type='mlp', separate_mean_var=False,
+					name=None, load_dir=None, deterministic=False):
+	if name is None:
+		name = 'BNNC'
+	print('[ BNNC ] Name {} | Observation dim {} | Action dim: {} | Hidden dim: {}'.format(name, obs_dim, act_dim, hidden_dim))
+	params = {'name': name, 'num_networks': num_networks, 'num_elites': num_elites,
+				'sess': session, 'separate_mean_var': separate_mean_var, 'deterministic': deterministic}
+
+	if load_dir is not None:
+		print('Specified load dir', load_dir)
+		params['model_dir'] = load_dir
+
+	model = BNNC(params)
+
+	if not model.model_loaded:
+		if model_type == 'identity':
+			return
+		elif model_type == 'linear':
+			print('[ BNNC ] Training linear model')
+			model.add(FC(obs_dim+rew_dim, input_dim=obs_dim+act_dim, weight_decay=0.000025))
+		elif model_type == 'mlp':
+			print('[ BNNC ] Training non-linear model | Obs: {} | Act: {} '.format(obs_dim, act_dim))
+			model.add(FC(hidden_dim, input_dim=obs_dim+act_dim, activation="swish", weight_decay=0.000025))
+			model.add(FC(hidden_dim, activation="swish", weight_decay=0.00005))
+			model.add(FC(hidden_dim, activation="swish", weight_decay=0.000075))
+			model.add(FC(hidden_dim, activation="swish", weight_decay=0.000075))
+			model.add(FC(1, weight_decay=0.0001))
+			if separate_mean_var:
+				model.add(FC(1, input_dim=hidden_dim, weight_decay=0.0001), var_layer=True)
+
+	if load_dir is not None:
+		model.model_loaded = True
+
+	model.finalize(tf.train.AdamOptimizer, {"learning_rate": 0.001})
+	print('[ BNNC ] Model: {}'.format(model))
 	return model
 
 def format_samples_for_training(samples):

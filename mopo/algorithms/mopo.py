@@ -16,13 +16,16 @@ from tensorflow.python.training import training_util
 from softlearning.algorithms.rl_algorithm import RLAlgorithm
 from softlearning.replay_pools.simple_replay_pool import SimpleReplayPool
 
-from mopo.models.constructor import construct_model, format_samples_for_training
+from mopo.models.constructor import construct_model, construct_modelr, construct_modelc, format_samples_for_training
 from mopo.models.fake_env import FakeEnv
 from mopo.utils.writer import Writer
 from mopo.utils.visualization import visualize_policy
 from mopo.utils.logging import Progress
 import mopo.utils.filesystem as filesystem
 import mopo.off_policy.loader as loader
+
+
+debug_data=False
 
 
 def td_target(reward, discount, next_value):
@@ -116,6 +119,16 @@ class MOPO(RLAlgorithm):
                                       num_networks=num_networks, num_elites=num_elites,
                                       model_type=model_type, separate_mean_var=separate_mean_var,
                                       name=model_name, load_dir=model_load_dir, deterministic=deterministic)
+        self._modelr = construct_modelr(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim,
+                                      num_networks=num_networks, num_elites=num_elites,
+                                      model_type=model_type, separate_mean_var=separate_mean_var,
+                                      #name=model_name, 
+                                      load_dir=model_load_dir, deterministic=True)
+        self._modelc = construct_modelc(obs_dim=obs_dim, act_dim=act_dim, hidden_dim=hidden_dim,
+                                      num_networks=num_networks, num_elites=num_elites,
+                                      model_type=model_type, separate_mean_var=separate_mean_var,
+                                      #name=model_name, 
+                                      load_dir=model_load_dir, deterministic=True)
         self._static_fns = static_fns
         self.fake_env = FakeEnv(self._model, self._static_fns, penalty_coeff=penalty_coeff,
                                 penalty_learned_var=penalty_learned_var)
@@ -218,20 +231,23 @@ class MOPO(RLAlgorithm):
 
         self._training_before_hook()
 
-        #### model training
-        print('[ MOPO ] log_dir: {} | ratio: {}'.format(self._log_dir, self._real_ratio))
-        print('[ MOPO ] Training model at epoch {} | freq {} | timestep {} (total: {})'.format(
-            self._epoch, self._model_train_freq, self._timestep, self._total_timestep)
-        )
-
-        max_epochs = 1 if self._model.model_loaded else None
-        model_train_metrics = self._train_model(batch_size=256, max_epochs=max_epochs, holdout_ratio=0.2, max_t=self._max_model_t)
-        model_metrics.update(model_train_metrics)
-        self._log_model()
-        gt.stamp('epoch_train_model')
-        #### 
 
         for self._epoch in gt.timed_for(range(self._epoch, self._n_epochs)):
+
+            if self._epoch%1200==0:
+                #### model training
+                print('[ MOPO ] log_dir: {} | ratio: {}'.format(self._log_dir, self._real_ratio))
+                print('[ MOPO ] Training model at epoch {} | freq {} | timestep {} (total: {})'.format(
+                    self._epoch, self._model_train_freq, self._timestep, self._total_timestep)
+                )
+                max_epochs = 1 if self._model.model_loaded else None
+                model_train_metrics = self._train_model(batch_size=256, max_epochs=max_epochs, holdout_ratio=0.2, max_t=self._max_model_t)
+                model_metrics.update(model_train_metrics)
+                self._log_model()
+                gt.stamp('epoch_train_model')
+                #### 
+ 
+
 
             self._epoch_before_hook()
             gt.stamp('epoch_before_hook')
@@ -325,6 +341,9 @@ class MOPO(RLAlgorithm):
 
             yield diagnostics
 
+        epi_ret = self._rollout_model_for_eval(self._training_environment.reset)
+        np.savetxt("epi_ret__fin.csv",epi_ret,delimiter=',')
+
         self.sampler.terminate()
 
         self._training_after_hook()
@@ -396,14 +415,154 @@ class MOPO(RLAlgorithm):
             self._model_pool = new_pool
 
     def _train_model(self, **kwargs):
+
+        from copy import deepcopy
+
+        # hyperparameter
+        smth=0.0
+        B_dash = 500.
+
+        env_samples = self._pool.return_all_samples()
+        train_inputs_master, train_outputs_master = format_samples_for_training(env_samples)
+
+        splitnum = 100
+
+        # for debug 
+        permutation = np.random.permutation(train_inputs_master.shape[0])[:int(train_inputs_master.shape[0]/20)]
+        #train_inputs_master = train_inputs_master[permutation]
+        #train_outputs_master = train_outputs_master[permutation]
+        #np.savetxt("train_inputs.csv",train_inputs_master,delimiter=',')
+        #np.savetxt("train_outputs.csv",train_outputs_master,delimiter=',')
+        if debug_data:
+            np.savetxt("reward_data.csv",train_outputs_master[:,:1],delimiter=',')
+
+        def compute_dr_weights():
+            for j in range(3):
+                train_inputs = deepcopy(train_inputs_master)
+                if 200000<train_inputs.shape[0]:
+                    np.random.shuffle(train_inputs)
+                    train_inputs = train_inputs[:200000]
+
+                fake_inputs = self._rollout_model_for_dr(self._training_environment.reset, train_inputs.shape[0])
+
+                # train ratio model
+                _ = self._modelr.train(train_inputs, fake_inputs, **kwargs)
+
+                train_inputs = deepcopy(train_inputs_master)
+                #dr_weights, _ = self._modelr.predict(train_inputs)
+                
+                train_inputs_list = np.array_split(train_inputs, splitnum)
+                dr_weights, _ = self._modelr.predict(train_inputs_list[0])
+                for i in range(1,splitnum):
+                    temp_dr_weights, _ = self._modelr.predict(train_inputs_list[i])
+                    dr_weights = np.concatenate([dr_weights, temp_dr_weights], 0)
+
+                if dr_weights.sum()>0:
+                    break
+                else:
+                    np.savetxt("dr_weights_raw_for_debug"+str(j)+".csv",dr_weights,delimiter=',')
+            dr_weights *= dr_weights.shape[0]/dr_weights.sum()
+            return dr_weights
+
+
+
         if self._model_type == 'identity':
             print('[ MOPO ] Identity model, skipping model')
             model_metrics = {}
         else:
-            env_samples = self._pool.return_all_samples()
-            train_inputs, train_outputs = format_samples_for_training(env_samples)
-            model_metrics = self._model.train(train_inputs, train_outputs, **kwargs)
+            if self._epoch>0:
+                epi_ret = self._rollout_model_for_eval(self._training_environment.reset)
+                np.savetxt("epi_ret__"+str(self._epoch)+".csv",epi_ret,delimiter=',')
+
+            # compute weight
+            print("training weights model for training")
+            if self._epoch>0:
+                dr_weights = compute_dr_weights()
+                if debug_data:
+                    np.savetxt("dr_weights_raw_"+str(self._epoch)+".csv",dr_weights,delimiter=',')            
+            else: 
+                dr_weights = np.ones((train_inputs_master.shape[0], 1))
+
+            # train dynamics model
+            print("training dynamics model ")
+            actual_dr_weights = dr_weights * smth + (1.-smth)
+            if debug_data:
+                np.savetxt("dr_weights_train_"+str(self._epoch)+".csv",actual_dr_weights,delimiter=',')
+            train_inputs = deepcopy(train_inputs_master)
+            train_outputs = deepcopy(train_outputs_master)
+            model_metrics = self._model.train(train_inputs, train_outputs, actual_dr_weights, **kwargs)
+
+            # compute weight
+            print("training weights model for evaluation")
+            dr_weights = compute_dr_weights()
+            if debug_data:
+                np.savetxt("dr_weights_eval_"+str(self._epoch)+".csv",dr_weights, delimiter=',')            
+
+            # compute loss
+            print("compute pointwise loss for evaluation")
+            train_inputs = deepcopy(train_inputs_master)
+            train_outputs = deepcopy(train_outputs_master)
+            train_inputs_list = np.array_split(train_inputs, splitnum)
+            train_outputs_list = np.array_split(train_outputs, splitnum)
+            loss_list = self._model.get_pointwise_loss(train_inputs_list[0], train_outputs_list[0])
+            for i in range(1,splitnum):
+                temp_loss_list = self._model.get_pointwise_loss(train_inputs_list[i], train_outputs_list[i])
+                loss_list = np.concatenate([loss_list, temp_loss_list], 0)
+            np.savetxt("loss_list"+str(self._epoch)+".csv",loss_list,delimiter=',')
+            losses = np.mean(loss_list*dr_weights)
+            loss_min = np.min(loss_list)
+
+            # compute coeff
+            b_coeff = 0.5 * B_dash / np.sqrt(losses - loss_min)
+            np.savetxt("loss_bcoeff_minloss_Bdash_smth"+str(self._epoch)+".csv",np.array([losses, b_coeff, loss_min, B_dash, smth]), delimiter=',')
+
+            # loss_model
+            print("training loss model")
+
+            #loss_list = ( b_coeff * (1.-self._discount) * (loss_list - loss_min) )
+
+            loss_list = (loss_list - loss_min) 
+            #loss_list = - ( b_coeff * (1.-self._discount) * (loss_list) - train_outputs_master[:,:1] )
+
+            loss_list2 = loss_list.reshape(loss_list.shape[0],)
+            #q25_q75 = np.percentile(loss_list2, q=[25, 75])
+            #iqr = q25_q75[1] - q25_q75[0]
+            #cutoff_low = q25_q75[0] - iqr*1.5
+            #cutoff_high = q25_q75[1] + iqr*1.5
+            #idx = np.where((loss_list2 > cutoff_low) & (loss_list2 < cutoff_high))
+
+            #Standard Deviation Method
+            loss_mean = np.mean(loss_list2)
+            loss_std  = np.std(loss_list2)
+            cutoff_low = loss_mean - loss_std*2.
+            cutoff_high = loss_mean + loss_std*2.
+            idx = np.where((loss_list2 > cutoff_low) & (loss_list2 < cutoff_high))
+
+            if debug_data:
+                np.savetxt("c_"+str(self._epoch)+".csv",loss_list, delimiter=',')            
+            loss_list = loss_list[idx]
+            train_inputs = deepcopy(train_inputs_master)[idx]
+            actual_dr_weights = (dr_weights * 0. + 1.)[idx]
+            self._modelc.train(train_inputs, loss_list, actual_dr_weights, **kwargs)
+
+
+            train_inputs = deepcopy(train_inputs_master)                
+            train_inputs_list = np.array_split(train_inputs, splitnum)
+            penalty_np, _ = self._modelc.predict(train_inputs_list[0])
+            for i in range(1,splitnum):
+                temp_penalty_np, _ = self._modelc.predict(train_inputs_list[i])
+                #print("temp_penalty_np",temp_penalty_np.shape)
+                penalty_np = np.concatenate([penalty_np, temp_penalty_np], 0)
+            if debug_data:
+                np.savetxt("predict_BC_"+str(self._epoch)+".csv",penalty_np*(1.-self._discount),delimiter=',')     
+
+            # implement loss model
+            self.fake_env.another_reward_model = self._modelc
+            self.fake_env.coeff = b_coeff * (1.-self._discount)
+
+
         return model_metrics
+
 
     def _rollout_model(self, rollout_batch_size, **kwargs):
         print('[ Model Rollout ] Starting | Epoch: {} | Rollout length: {} | Batch size: {} | Type: {}'.format(
@@ -427,6 +586,7 @@ class MOPO(RLAlgorithm):
             else:
                 next_obs, rew, term, info = self.fake_env.step(obs, act, **kwargs)
             steps_added.append(len(obs))
+            print("rew_min, rew_mean, rew_max, ",np.min(rew), np.mean(rew), np.max(rew))
 
             samples = {'observations': obs, 'actions': act, 'next_observations': next_obs, 'rewards': rew, 'terminals': term}
             self._model_pool.add_samples(samples)
@@ -435,7 +595,6 @@ class MOPO(RLAlgorithm):
             if nonterm_mask.sum() == 0:
                 print('[ Model Rollout ] Breaking early: {} | {} / {}'.format(i, nonterm_mask.sum(), nonterm_mask.shape))
                 break
-
             obs = next_obs[nonterm_mask]
 
         mean_rollout_length = sum(steps_added) / rollout_batch_size
@@ -444,6 +603,87 @@ class MOPO(RLAlgorithm):
             sum(steps_added), self._model_pool.size, self._model_pool._max_size, mean_rollout_length, self._n_train_repeat
         ))
         return rollout_stats
+
+
+    def _rollout_model_for_dr(self, env_reset, data_num, **kwargs):
+
+        from copy import deepcopy
+        print("rollout for ratio estimation")
+        ob = np.array([ env_reset()['observations'] for i in range(100)])
+        ac = self._policy.actions_np(ob)
+        ob_store = deepcopy(ob)
+        ac_store = deepcopy(ac)
+        total_ob_store = None
+        total_ac_store = None
+        while True:
+            overflowFlag=False
+            while True:
+                ob, rew, term, info = self.fake_env.step(ob, ac, **kwargs)
+                nonterm_mask = ~term.squeeze(-1)
+                ob = ob[nonterm_mask]
+                temp_rand = np.random.rand(ob.shape[0])
+                ob = ob[np.where(temp_rand<self._discount)]
+                if ob.shape[0] == 0:
+                    break
+                if np.count_nonzero(np.isnan(ob))>0:
+                    overflowFlag=True
+                    break
+                ac = self._policy.actions_np(ob)
+                if np.count_nonzero(np.isnan(ac))>0:
+                    overflowFlag=True
+                    break
+                ob_store = np.concatenate([ob_store,ob])
+                ac_store = np.concatenate([ac_store,ac])
+
+            if overflowFlag is False:
+                if total_ob_store is None:
+                    total_ob_store = deepcopy(ob_store)
+                    total_ac_store = deepcopy(ac_store)
+                else:
+                    total_ob_store = np.concatenate([total_ob_store,ob_store])
+                    total_ac_store = np.concatenate([total_ac_store,ac_store])
+
+            if total_ob_store is not None:
+                print("total_ob_store.shape[0]",total_ob_store.shape[0],"overflowFlag",overflowFlag)
+                if total_ob_store.shape[0]>data_num:
+                    break
+
+            ob = np.array([ env_reset()['observations'] for i in range(100)])
+            ac = self._policy.actions_np(ob)
+            ob_store = deepcopy(ob)
+            ac_store = deepcopy(ac)
+
+
+        ret_data = np.concatenate([total_ob_store,total_ac_store],axis=1)
+        np.random.shuffle(ret_data)
+        return ret_data[:int(data_num)]
+
+
+    def _rollout_model_for_eval(self, env_reset, **kwargs):
+
+        epi_ret_list=[]
+        for j in range(20):
+            ob = env_reset()['observations']
+            ob = ob.reshape(1,ob.shape[0])
+            temp_epi_ret = 0.
+            temp_gamma=1.
+            for i in range(1000):
+                ac = self._policy.actions_np(ob)
+                ob, rew, term, info = self.fake_env.step(ob, ac, **kwargs)
+                #temp_epi_ret += temp_gamma*rew
+                temp_epi_ret += temp_gamma*info['unpenalized_rewards']
+                temp_gamma *= self._discount
+                if (True in term[0]):
+                    break
+                #if np.random.rand()>self._discount:
+                #    break
+            print("term",term, ", epi_ret",temp_epi_ret[0][0], ", last_rew",rew,", unpenalized_rewards", info['unpenalized_rewards'],", penalty", info['penalty'])
+            #print("mean",info['mean'])
+            if not np.isnan(temp_epi_ret[0][0]):
+                epi_ret_list.append(temp_epi_ret[0][0])
+        #return sum(epi_ret_list)/len(epi_ret_list)
+        return np.array(epi_ret_list)
+
 
     def _visualize_model(self, env, timestep):
         ## save env state

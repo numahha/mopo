@@ -12,6 +12,7 @@ class FakeEnv:
         self.penalty_coeff = penalty_coeff
         self.penalty_learned_var = penalty_learned_var
         self.penalty_learned_var_random = penalty_learned_var_random
+        self.another_reward_model=None
 
     '''
         x : [ batch_size, obs_dim + 1 ]
@@ -23,7 +24,7 @@ class FakeEnv:
         k = x.shape[-1]
 
         ## [ num_networks, batch_size ]
-        log_prob = -1/2 * (k * np.log(2*np.pi) + np.log(variances).sum(-1) + (np.power(x-means, 2)/variances).sum(-1))
+        log_prob = -1/2 * (k * np.log(2*np.pi) + np.log(variances).sum(-1) + (np.power(x-means, 2)/(variances)).sum(-1))
         
         ## [ batch_size ]
         prob = np.exp(log_prob).sum(0)
@@ -68,6 +69,12 @@ class FakeEnv:
             model_means = np.mean(ensemble_model_means, axis=0)
             model_stds = np.mean(ensemble_model_stds, axis=0)
 
+        #print("ensemble_samples.shape, ensemble_samples[:,:,:1].shape",ensemble_samples.shape, ensemble_samples[:,:,:1].shape)
+
+        samples[:,:1] = np.mean(ensemble_samples[:,:,:1], axis=0)
+        model_means[:,:1] = np.mean( ensemble_model_means[:,:,:1], axis=0)
+        model_stds[:,:1] = np.mean( ensemble_model_stds[:,:,:1], axis=0)
+
         log_prob, dev = self._get_logprob(samples, ensemble_model_means, ensemble_model_vars)
 
         rewards, next_obs = samples[:,:1], samples[:,1:]
@@ -77,42 +84,24 @@ class FakeEnv:
         return_means = np.concatenate((model_means[:,:1], terminals, model_means[:,1:]), axis=-1)
         return_stds = np.concatenate((model_stds[:,:1], np.zeros((batch_size,1)), model_stds[:,1:]), axis=-1)
 
-        if self.penalty_coeff != 0:
-            if not self.penalty_learned_var:
-                ensemble_means_obs = ensemble_model_means[:,:,1:]
-                mean_obs_means = np.mean(ensemble_means_obs, axis=0)     # average predictions over models
-                diffs = ensemble_means_obs - mean_obs_means
-                normalize_diffs = False
-                if normalize_diffs:
-                    obs_dim = next_obs.shape[1]
-                    obs_sigma = self.model.scaler.cached_sigma[0,:obs_dim]
-                    diffs = diffs / obs_sigma
-                dists = np.linalg.norm(diffs, axis=2)   # distance in obs space
-                penalty = np.max(dists, axis=0)         # max distances over models
-            else:
-                penalty = np.amax(np.linalg.norm(ensemble_model_stds, axis=2), axis=0)
-
-            penalty = np.expand_dims(penalty, 1)
-            assert penalty.shape == rewards.shape
-            unpenalized_rewards = rewards
-            penalized_rewards = rewards - self.penalty_coeff * penalty
-        else:
+        if self.another_reward_model is None:
             penalty = None
             unpenalized_rewards = rewards
             penalized_rewards = rewards
-
-        if return_single:
-            next_obs = next_obs[0]
-            return_means = return_means[0]
-            return_stds = return_stds[0]
-            unpenalized_rewards = unpenalized_rewards[0]
-            penalized_rewards = penalized_rewards[0]
-            terminals = terminals[0]
+        else:
+            penalty, _ = self.another_reward_model.predict(inputs)
+            #print("penalty.shape",rewards.shape,penalty.shape)
+            #penalty = np.expand_dims(penalty, 1)
+            #print("penalty.shape",rewards.shape,penalty.shape)
+            assert penalty.shape == rewards.shape
+            unpenalized_rewards = rewards
+            penalized_rewards = rewards - penalty * self.coeff
 
         info = {'mean': return_means, 'std': return_stds, 'log_prob': log_prob, 'dev': dev,
                 'unpenalized_rewards': unpenalized_rewards, 'penalty': penalty, 'penalized_rewards': penalized_rewards}
         return next_obs, penalized_rewards, terminals, info
 
+    """
     ## for debugging computation graph
     def step_ph(self, obs_ph, act_ph, deterministic=False):
         assert len(obs_ph.shape) == len(act_ph.shape)
@@ -139,6 +128,7 @@ class FakeEnv:
         info = {}
 
         return next_obs, rewards, terminals, info
+    """
 
     def close(self):
         pass
