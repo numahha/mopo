@@ -1,3 +1,7 @@
+# adapt from https://github.com/tianheyu927/mopo/blob/mopo/models/bnn.py 
+
+
+
 from __future__ import division
 from __future__ import print_function
 from __future__ import absolute_import
@@ -61,8 +65,9 @@ class BNN:
 
         # Training objects
         self.optimizer = None
-        self.sy_train_in, self.sy_train_targ = None, None
+        self.sy_train_in, self.sy_train_targ, self.sy_train_w = None, None, None # modify
         self.train_op, self.mse_loss = None, None
+        self.mse_loss2 = None
 
         # Prediction objects
         self.sy_pred_in2d, self.sy_pred_mean2d_fac, self.sy_pred_var2d_fac = None, None, None
@@ -97,6 +102,9 @@ class BNN:
             print("Created a neural network with variance predictions.")
         else:
             print("Created an ensemble of {} neural networks with variance predictions | Elites: {}".format(self.num_nets, self.num_elites))
+
+        self._model_inds = [i for i in range(self.num_elites)]
+
 
     @property
     def is_probabilistic(self):
@@ -239,15 +247,22 @@ class BNN:
                 self.sy_train_targ = tf.placeholder(dtype=tf.float32,
                                                     shape=[self.num_nets, None, self.layers[-1].get_output_dim()],
                                                     name="training_targets")
+            self.sy_train_w = tf.placeholder(dtype=tf.float32,
+                                             shape=[self.num_nets, None, 1],
+                                             name="training_w") # modify
+
             if not self.deterministic:
-                train_loss = tf.reduce_sum(self._compile_losses(self.sy_train_in, self.sy_train_targ, inc_var_loss=True))
+                train_loss = tf.reduce_sum(self._compile_losses(self.sy_train_in, self.sy_train_targ, self.sy_train_w)) # modify
                 train_loss += tf.add_n(self.decays)
                 train_loss += 0.01 * tf.reduce_sum(self.max_logvar) - 0.01 * tf.reduce_sum(self.min_logvar)
             else:
-                train_loss = self._compile_losses(self.sy_train_in, self.sy_train_targ, inc_var_loss=False)
+                train_loss = self._compile_losses(self.sy_train_in, self.sy_train_targ, self.sy_train_w) # modify
                 train_loss += tf.add_n(self.decays)
-            self.mse_loss = self._compile_losses(self.sy_train_in, self.sy_train_targ, inc_var_loss=False)
+            self.mse_loss  = self._compile_losses(self.sy_train_in, self.sy_train_targ, self.sy_train_w) # modify
             self.train_op = self.optimizer.minimize(train_loss, var_list=self.optvars)
+
+            self.mse_loss2 = self._compile_losses2(self.sy_train_in, self.sy_train_targ) # modify
+
 
         # Initialize all variables
         self.sess.run(tf.variables_initializer(self.optvars + self.nonoptvars + self.optimizer.variables()))
@@ -312,12 +327,13 @@ class BNN:
             current = holdout_losses[i]
             _, best = self._snapshots[i]
             improvement = (best - current) / best
-            if improvement > 0.01:
+            if (improvement > 0.01 and best > 0.) or (-improvement > 0.01 and best < 0.):
+            #if (improvement > 1. and best > 0.) or (-improvement > 1. and best < 0.):
                 self._snapshots[i] = (epoch, current)
                 self._save_state(i)
                 updated = True
                 improvement = (best - current) / best
-                # print('epoch {} | updated {} | improvement: {:.4f} | best: {:.4f} | current: {:.4f}'.format(epoch, i, improvement, best, current))
+                #print('epoch {} | updated {} | improvement: {:.4f} | best: {:.4f} | current: {:.4f}'.format(epoch, i, improvement, best, current))
         
         if updated:
             self._epochs_since_update = 0
@@ -325,7 +341,7 @@ class BNN:
             self._epochs_since_update += 1
 
         if self._epochs_since_update > self._max_epochs_since_update:
-            # print('[ BNN ] Breaking at epoch {}: {} epochs since update ({} max)'.format(epoch, self._epochs_since_update, self._max_epochs_since_update))
+            print('[ BNN ] Breaking at epoch {}: {} epochs since update ({} max)'.format(epoch, self._epochs_since_update, self._max_epochs_since_update))
             return True
         else:
             return False
@@ -350,14 +366,15 @@ class BNN:
         if self.separate_mean_var:
             [layer.reset(self.sess) for layer in self.var_layers]
 
-    def validate(self, inputs, targets):
+    def validate(self, inputs, targets, dr_weights): # modify
         inputs = np.tile(inputs[None], [self.num_nets, 1, 1])
         targets = np.tile(targets[None], [self.num_nets, 1, 1])
+        dr_weights = np.tile(dr_weights[None], [self.num_nets, 1, 1]) # modify
         losses = self.sess.run(
             self.mse_loss,
             feed_dict={
                 self.sy_train_in: inputs,
-                self.sy_train_targ: targets
+                self.sy_train_targ: targets, self.sy_train_w: dr_weights # modify
                 }
         )
         mean_elite_loss = np.sort(losses)[:self.num_elites].mean()
@@ -367,7 +384,20 @@ class BNN:
     # Model Methods #
     #################
 
-    def train(self, inputs, targets,
+    def get_pointwise_loss(self, inputs, targets):
+
+        inputs = np.tile(inputs[None], [self.num_nets, 1, 1])
+        targets = np.tile(targets[None], [self.num_nets, 1, 1])
+        temp_losses = self.sess.run(
+                self.mse_loss2,
+                feed_dict={self.sy_train_in: inputs, self.sy_train_targ: targets
+                }
+            ) 
+        temp_losses = temp_losses * 0.5 
+        return np.mean(temp_losses[self._model_inds],axis=0).reshape(inputs.shape[1],1)
+
+
+    def train(self, inputs, targets, dr_weights,
               batch_size=32, max_epochs=None, max_epochs_since_update=5,
               hide_progress=False, holdout_ratio=0.0, max_logging=1000, max_grad_updates=None, timer=None, max_t=None):
         """Trains/Continues network training
@@ -382,6 +412,7 @@ class BNN:
 
         Returns: None
         """
+
         self._max_epochs_since_update = max_epochs_since_update
         self._start_train()
         break_train = False
@@ -395,9 +426,12 @@ class BNN:
         permutation = np.random.permutation(inputs.shape[0])
         inputs, holdout_inputs = inputs[permutation[num_holdout:]], inputs[permutation[:num_holdout]]
         targets, holdout_targets = targets[permutation[num_holdout:]], targets[permutation[:num_holdout]]
+        dr_weights, holdout_dr_weights = dr_weights[permutation[num_holdout:]], dr_weights[permutation[:num_holdout]] # modify
         holdout_inputs = np.tile(holdout_inputs[None], [self.num_nets, 1, 1])
         holdout_targets = np.tile(holdout_targets[None], [self.num_nets, 1, 1])
+        holdout_dr_weights = np.tile(holdout_dr_weights[None], [self.num_nets, 1, 1]) # modify
 
+        print('\n\n[ BNN ] training start !')
         print('[ BNN ] Training {} | Holdout: {}'.format(inputs.shape, holdout_inputs.shape))
         with self.sess.as_default():
             self.scaler.fit(inputs)
@@ -416,14 +450,17 @@ class BNN:
         # else:
         #     epoch_range = trange(epochs, unit="epoch(s)", desc="Network training")
 
+
         t0 = time.time()
         grad_updates = 0
         for epoch in epoch_iter:
             for batch_num in range(int(np.ceil(idxs.shape[-1] / batch_size))):
                 batch_idxs = idxs[:, batch_num * batch_size:(batch_num + 1) * batch_size]
+                #print("idxs",batch_idxs.shape, idxs.shape)
                 self.sess.run(
                     self.train_op,
-                    feed_dict={self.sy_train_in: inputs[batch_idxs], self.sy_train_targ: targets[batch_idxs]}
+                    feed_dict={self.sy_train_in: inputs[batch_idxs], self.sy_train_targ: targets[batch_idxs], self.sy_train_w: dr_weights[batch_idxs] # modify
+                    }
                 )
                 grad_updates += 1
 
@@ -434,7 +471,7 @@ class BNN:
                             self.mse_loss,
                             feed_dict={
                                 self.sy_train_in: inputs[idxs[:, :max_logging]],
-                                self.sy_train_targ: targets[idxs[:, :max_logging]]
+                                self.sy_train_targ: targets[idxs[:, :max_logging]], self.sy_train_w: dr_weights[idxs[:, :max_logging]] # modify
                             }
                         )
                     named_losses = [['M{}'.format(i), losses[i]] for i in range(len(losses))]
@@ -444,14 +481,14 @@ class BNN:
                             self.mse_loss,
                             feed_dict={
                                 self.sy_train_in: inputs[idxs[:, :max_logging]],
-                                self.sy_train_targ: targets[idxs[:, :max_logging]]
+                                self.sy_train_targ: targets[idxs[:, :max_logging]], self.sy_train_w: dr_weights[idxs[:, :max_logging]] # modify
                             }
                         )
                     holdout_losses = self.sess.run(
                             self.mse_loss,
                             feed_dict={
                                 self.sy_train_in: holdout_inputs,
-                                self.sy_train_targ: holdout_targets
+                                self.sy_train_targ: holdout_targets, self.sy_train_w: holdout_dr_weights # modify
                             }
                         )
                     named_losses = [['M{}'.format(i), losses[i]] for i in range(len(losses))]
@@ -482,7 +519,7 @@ class BNN:
             self.mse_loss,
             feed_dict={
                 self.sy_train_in: holdout_inputs,
-                self.sy_train_targ: holdout_targets
+                self.sy_train_targ: holdout_targets, self.sy_train_w: holdout_dr_weights # modify
             }
         )
 
@@ -494,6 +531,7 @@ class BNN:
         val_loss = (np.sort(holdout_losses)[:self.num_elites]).mean()
         model_metrics = {'val_loss': val_loss}
         print('[ BNN ] Holdout', np.sort(holdout_losses), model_metrics)
+        print('[ BNN ] Training finish !')
         return OrderedDict(model_metrics)
         # return np.sort(holdout_losses)[]
 
@@ -667,7 +705,7 @@ class BNN:
         else:
             return mean, tf.exp(logvar)
 
-    def _compile_losses(self, inputs, targets, inc_var_loss=True):
+    def _compile_losses(self, inputs, targets, dr_weights): # modify
         """Helper method for compiling the loss function.
 
         The loss function is obtained from the log likelihood, assuming that the output
@@ -677,18 +715,36 @@ class BNN:
         Arguments:
             inputs: (tf.Tensor) A tensor representing the input batch
             targets: (tf.Tensor) The desired targets for each input vector in inputs.
-            inc_var_loss: (bool) If True, includes log variance loss.
 
         Returns: (tf.Tensor) A tensor representing the loss on the input arguments.
         """
         mean, log_var = self._compile_outputs(inputs, ret_log_var=True)
         inv_var = tf.exp(-log_var)
 
-        if inc_var_loss:
-            mse_losses = tf.reduce_mean(tf.reduce_mean(tf.square(mean - targets) * inv_var, axis=-1), axis=-1)
-            var_losses = tf.reduce_mean(tf.reduce_mean(log_var, axis=-1), axis=-1)
-            total_losses = mse_losses + var_losses
-        else:
-            total_losses = tf.reduce_mean(tf.reduce_mean(tf.square(mean - targets), axis=-1), axis=-1)
+        return tf.reduce_mean(tf.reduce_mean( ( tf.square(mean - targets) * inv_var * dr_weights + log_var * dr_weights), axis=-1), axis=-1) # modify
 
-        return total_losses
+
+
+        #nextob_loss = tf.reduce_mean(tf.reduce_mean( ( tf.square(mean[:,:,1:] - targets[:,:,1:]) * inv_var[:,:,1:] * dr_weights + log_var[:,:,1:] * dr_weights), axis=-1), axis=-1)
+        #rew_loss = tf.reduce_mean(tf.reduce_mean( ( tf.abs(mean[:,:,:1] - targets[:,:,:1]) * dr_weights), axis=-1), axis=-1)
+        #return nextob_loss #+ 2.*rew_loss
+
+
+
+    def _compile_losses2(self, inputs, targets): # modify
+        """Helper method for compiling the loss function.
+
+        The loss function is obtained from the log likelihood, assuming that the output
+        distribution is Gaussian, with both mean and (diagonal) covariance matrix being determined
+        by network outputs.
+
+        Arguments:
+            inputs: (tf.Tensor) A tensor representing the input batch
+            targets: (tf.Tensor) The desired targets for each input vector in inputs.
+
+        Returns: (tf.Tensor) A tensor representing the loss on the input arguments.
+        """
+        mean, log_var = self._compile_outputs(inputs, ret_log_var=True)
+        inv_var = tf.exp(-log_var)
+        return tf.reduce_mean( ( tf.square(mean - targets) * inv_var + log_var), axis=-1)
+        #return tf.reduce_mean( ( tf.square(mean[:,:,1:] - targets[:,:,1:]) * inv_var[:,:,1:] + log_var[:,:,1:]), axis=-1)
