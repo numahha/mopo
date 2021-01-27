@@ -9,6 +9,7 @@ params.update({
 params['kwargs'].update({
     'pool_load_path': 'd4rl/walker2d-random-v0',
     'pool_load_max_size': 10**6,
-    'rollout_length': 1,
+    'rollout_length': 5,
+    #'rollout_length': 5,
     'penalty_coeff': 1.0
 })

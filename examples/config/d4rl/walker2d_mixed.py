@@ -9,6 +9,6 @@ params.update({
 params['kwargs'].update({
     'pool_load_path': 'd4rl/walker2d-medium-replay-v0',
     'pool_load_max_size': 100930,
-    'rollout_length': 1,
+    'rollout_length': 5,
     'penalty_coeff': 1.0
 })
