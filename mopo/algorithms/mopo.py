@@ -25,7 +25,7 @@ import mopo.utils.filesystem as filesystem
 import mopo.off_policy.loader as loader
 
 
-debug_data=False
+debug_data=True
 
 
 def td_target(reward, discount, next_value):
@@ -234,7 +234,7 @@ class MOPO(RLAlgorithm):
 
         for self._epoch in gt.timed_for(range(self._epoch, self._n_epochs)):
 
-            if self._epoch%1200==0:
+            if self._epoch%200==0:
                 #### model training
                 print('[ MOPO ] log_dir: {} | ratio: {}'.format(self._log_dir, self._real_ratio))
                 print('[ MOPO ] Training model at epoch {} | freq {} | timestep {} (total: {})'.format(
@@ -419,8 +419,8 @@ class MOPO(RLAlgorithm):
         from copy import deepcopy
 
         # hyperparameter
-        smth=0.0
-        B_dash = 500.
+        smth=0.1
+        B_dash = 200.
 
         env_samples = self._pool.return_all_samples()
         train_inputs_master, train_outputs_master = format_samples_for_training(env_samples)
@@ -488,9 +488,13 @@ class MOPO(RLAlgorithm):
             actual_dr_weights = dr_weights * smth + (1.-smth)
             if debug_data:
                 np.savetxt("dr_weights_train_"+str(self._epoch)+".csv",actual_dr_weights,delimiter=',')
-            train_inputs = deepcopy(train_inputs_master)
-            train_outputs = deepcopy(train_outputs_master)
-            model_metrics = self._model.train(train_inputs, train_outputs, actual_dr_weights, **kwargs)
+            if (smth>0.01) or (self._epoch==0):
+                train_inputs = deepcopy(train_inputs_master)
+                train_outputs = deepcopy(train_outputs_master)
+                model_metrics = self._model.train(train_inputs, train_outputs[:,1:], actual_dr_weights, **kwargs)
+                self._model_metrics_prev = model_metrics
+            else:
+                model_metrics = self._model_metrics_prev
 
             # compute weight
             print("training weights model for evaluation")
@@ -514,7 +518,7 @@ class MOPO(RLAlgorithm):
 
             # compute coeff
             b_coeff = 0.5 * B_dash / np.sqrt(losses - loss_min)
-            np.savetxt("loss_bcoeff_minloss_Bdash_smth"+str(self._epoch)+".csv",np.array([losses, b_coeff, loss_min, B_dash, smth]), delimiter=',')
+            np.savetxt("Lloss_bcoeff_minloss_Bdash_smth"+str(self._epoch)+".csv",np.array([losses, b_coeff, loss_min, B_dash, smth]), delimiter=',')
 
             # loss_model
             print("training loss model")
@@ -540,9 +544,9 @@ class MOPO(RLAlgorithm):
 
             if debug_data:
                 np.savetxt("c_"+str(self._epoch)+".csv",loss_list, delimiter=',')            
-            loss_list = loss_list[idx]
-            train_inputs = deepcopy(train_inputs_master)[idx]
-            actual_dr_weights = (dr_weights * 0. + 1.)[idx]
+            #loss_list = loss_list[idx]
+            train_inputs = deepcopy(train_inputs_master)#[idx]
+            actual_dr_weights = (dr_weights * 0. + 1.)#[idx]
             self._modelc.train(train_inputs, loss_list, actual_dr_weights, **kwargs)
 
 
@@ -554,7 +558,7 @@ class MOPO(RLAlgorithm):
                 #print("temp_penalty_np",temp_penalty_np.shape)
                 penalty_np = np.concatenate([penalty_np, temp_penalty_np], 0)
             if debug_data:
-                np.savetxt("predict_BC_"+str(self._epoch)+".csv",penalty_np*(1.-self._discount),delimiter=',')     
+                np.savetxt("Ppredict_BC_"+str(self._epoch)+".csv",penalty_np*(1.-self._discount),delimiter=',')     
 
             # implement loss model
             self.fake_env.another_reward_model = self._modelc
@@ -587,6 +591,7 @@ class MOPO(RLAlgorithm):
                 next_obs, rew, term, info = self.fake_env.step(obs, act, **kwargs)
             steps_added.append(len(obs))
             print("rew_min, rew_mean, rew_max, ",np.min(rew), np.mean(rew), np.max(rew))
+            print("pen_min, pen_mean, pen_max, ",np.min(info['penalty']), np.mean(info['penalty']), np.max(info['penalty']))
 
             samples = {'observations': obs, 'actions': act, 'next_observations': next_obs, 'rewards': rew, 'terminals': term}
             self._model_pool.add_samples(samples)
@@ -625,11 +630,11 @@ class MOPO(RLAlgorithm):
                 ob = ob[np.where(temp_rand<self._discount)]
                 if ob.shape[0] == 0:
                     break
-                if np.count_nonzero(np.isnan(ob))>0:
+                if np.count_nonzero(np.isnan(ob))>0 or (np.nanmax(ob)>1.e12) or (np.nanmin(ob)<-1.e12):
                     overflowFlag=True
                     break
                 ac = self._policy.actions_np(ob)
-                if np.count_nonzero(np.isnan(ac))>0:
+                if np.count_nonzero(np.isnan(ac))>0 or (np.nanmax(ac)>1.e12) or (np.nanmin(ac)<-1.e12):
                     overflowFlag=True
                     break
                 ob_store = np.concatenate([ob_store,ob])
