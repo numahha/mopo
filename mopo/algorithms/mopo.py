@@ -342,7 +342,7 @@ class MOPO(RLAlgorithm):
             yield diagnostics
 
         epi_ret = self._rollout_model_for_eval(self._training_environment.reset)
-        np.savetxt("epi_ret__fin.csv",epi_ret,delimiter=',')
+        np.savetxt("EEepi_ret__fin.csv",epi_ret,delimiter=',')
 
         self.sampler.terminate()
 
@@ -488,10 +488,10 @@ class MOPO(RLAlgorithm):
             actual_dr_weights = dr_weights * smth + (1.-smth)
             if debug_data:
                 np.savetxt("dr_weights_train_"+str(self._epoch)+".csv",actual_dr_weights,delimiter=',')
-            if (smth>0.01) or (self._epoch==0):
+            if (smth>-0.01) or (self._epoch==0):
                 train_inputs = deepcopy(train_inputs_master)
                 train_outputs = deepcopy(train_outputs_master)
-                model_metrics = self._model.train(train_inputs, train_outputs[:,1:], actual_dr_weights, **kwargs)
+                model_metrics = self._model.train(train_inputs, train_outputs, actual_dr_weights, **kwargs)
                 self._model_metrics_prev = model_metrics
             else:
                 model_metrics = self._model_metrics_prev
@@ -614,7 +614,7 @@ class MOPO(RLAlgorithm):
 
         from copy import deepcopy
         print("rollout for ratio estimation")
-        ob = np.array([ env_reset()['observations'] for i in range(100)])
+        ob = np.array([ env_reset()['observations'] for i in range(20)])
         ac = self._policy.actions_np(ob)
         ob_store = deepcopy(ob)
         ac_store = deepcopy(ac)
@@ -630,11 +630,11 @@ class MOPO(RLAlgorithm):
                 ob = ob[np.where(temp_rand<self._discount)]
                 if ob.shape[0] == 0:
                     break
-                if np.count_nonzero(np.isnan(ob))>0 or (np.nanmax(ob)>1.e12) or (np.nanmin(ob)<-1.e12):
+                if np.count_nonzero(np.isnan(ob))>0 or (np.nanmax(ob)>1.e20) or (np.nanmin(ob)<-1.e20):
                     overflowFlag=True
                     break
                 ac = self._policy.actions_np(ob)
-                if np.count_nonzero(np.isnan(ac))>0 or (np.nanmax(ac)>1.e12) or (np.nanmin(ac)<-1.e12):
+                if np.count_nonzero(np.isnan(ac))>0 or (np.nanmax(ac)>1.e20) or (np.nanmin(ac)<-1.e20):
                     overflowFlag=True
                     break
                 ob_store = np.concatenate([ob_store,ob])
@@ -653,7 +653,7 @@ class MOPO(RLAlgorithm):
                 if total_ob_store.shape[0]>data_num:
                     break
 
-            ob = np.array([ env_reset()['observations'] for i in range(100)])
+            ob = np.array([ env_reset()['observations'] for i in range(20)])
             ac = self._policy.actions_np(ob)
             ob_store = deepcopy(ob)
             ac_store = deepcopy(ac)
